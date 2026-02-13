@@ -6,7 +6,8 @@ services:
     environment:
       - TZ=America/Sao_Paulo
       - GIT_BRANCH=main
-      - GIT_PAT=troque_por_um_pat
+      # Opcional: use PAT apenas se o repo for privado (para repo publico, remova).
+      # - GIT_PAT=github_pat_xxx
       - MIKROTIK_MCP_LOG_LEVEL=debug
 
       - MIKROTIK_MCP_TRANSPORT=http
@@ -23,7 +24,10 @@ services:
         set -eu;
         apk add --no-cache git ca-certificates;
 
-        REPO_URL="https://x-access-token:$$GIT_PAT@github.com/SUA_ORG/mcp-mikrotik.git";
+        REPO_URL="https://github.com/SSolucao/mcp-mikrotik.git";
+        if [ -n "${GIT_PAT:-}" ]; then
+          REPO_URL="https://x-access-token:$$GIT_PAT@github.com/SSolucao/mcp-mikrotik.git";
+        fi;
 
         if [ ! -d /opt/app/.git ]; then
           git clone --depth 1 -b "$$GIT_BRANCH" "$$REPO_URL" /opt/app;
@@ -70,7 +74,7 @@ services:
       labels:
         - traefik.enable=true
         - traefik.docker.network=network_public
-        - traefik.http.routers.mcp-mikrotik.rule=Host(`mcpmikrotik.seudominio.com.br`)
+        - traefik.http.routers.mcp-mikrotik.rule=Host(`mcpmikrotik.supersolucao.com.br`)
         - traefik.http.routers.mcp-mikrotik.entrypoints=websecure
         - traefik.http.routers.mcp-mikrotik.tls.certresolver=letsencryptresolver
         - traefik.http.services.mcp-mikrotik.loadbalancer.server.port=3333

@@ -1,0 +1,86 @@
+version: "3.7"
+
+services:
+  mcp_mikrotik:
+    image: node:20-alpine
+    environment:
+      - TZ=America/Sao_Paulo
+      - GIT_BRANCH=main
+      - GIT_PAT=troque_por_um_pat
+      - MIKROTIK_MCP_LOG_LEVEL=debug
+
+      - MIKROTIK_MCP_TRANSPORT=http
+      - MIKROTIK_MCP_HOST=0.0.0.0
+      - MIKROTIK_MCP_PORT=3333
+      - MIKROTIK_MCP_PATH=/mcp
+      - MIKROTIK_MCP_AUTH_TOKEN=troque_por_um_token_forte
+    networks:
+      - network_public
+    volumes:
+      - mcp_mikrotik_app:/opt/app
+    command: >
+      sh -lc '
+        set -eu;
+        apk add --no-cache git ca-certificates;
+
+        REPO_URL="https://x-access-token:$$GIT_PAT@github.com/SUA_ORG/mcp-mikrotik.git";
+
+        if [ ! -d /opt/app/.git ]; then
+          git clone --depth 1 -b "$$GIT_BRANCH" "$$REPO_URL" /opt/app;
+        fi;
+
+        cd /opt/app;
+        git remote set-url origin "$$REPO_URL";
+        git fetch --depth 1 origin "$$GIT_BRANCH";
+        git checkout -B "$$GIT_BRANCH" "origin/$$GIT_BRANCH";
+
+        if [ ! -d node_modules ]; then
+          npm ci;
+        fi;
+
+        npm run build;
+
+        echo "[start] node dist/index.js";
+        node dist/index.js 2>&1 || exit 1;
+
+        echo "[fatal] node exited unexpectedly";
+        exit 1
+      '
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3333/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 2m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 0
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=network_public
+        - traefik.http.routers.mcp-mikrotik.rule=Host(`mcpmikrotik.seudominio.com.br`)
+        - traefik.http.routers.mcp-mikrotik.entrypoints=websecure
+        - traefik.http.routers.mcp-mikrotik.tls.certresolver=letsencryptresolver
+        - traefik.http.services.mcp-mikrotik.loadbalancer.server.port=3333
+        - traefik.http.services.mcp-mikrotik.loadbalancer.passHostHeader=1
+
+volumes:
+  mcp_mikrotik_app:
+    external: false
+
+networks:
+  network_public:
+    external: true
+    name: network_public

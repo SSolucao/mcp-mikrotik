@@ -9,6 +9,7 @@ services:
       # Opcional: use PAT apenas se o repo for privado (para repo publico, remova).
       # - GIT_PAT=github_pat_xxx
       - MIKROTIK_MCP_LOG_LEVEL=debug
+      - MCP_MIKROTIK_DEPLOY_REV=20ed702
 
       - MIKROTIK_MCP_TRANSPORT=http
       - MIKROTIK_MCP_HOST=0.0.0.0

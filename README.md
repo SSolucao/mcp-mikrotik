@@ -28,9 +28,9 @@ Authorization: Bearer <MIKROTIK_MCP_AUTH_TOKEN>
 
 ## Tools
 
-### `mikrotik__run`
+### `mikrotik__run` (modo livre)
 
-Executa um comando RouterOS API.
+Executa qualquer comando RouterOS API (pode retornar payload grande).
 
 Input:
 
@@ -48,7 +48,26 @@ Input:
 }
 ```
 
-Observacao: `words` sao as "palavras" cruas do protocolo API (ex.: `=numbers=*1`, `=disabled=yes`, `?.id=*1`).
+Observacao: `words` sao as "palavras" cruas do protocolo API (ex.: `=.proplist=...`, `=numbers=*1`, `=disabled=yes`, `?=chain=input`).
+
+### `mikrotik__print` (economia de tokens)
+
+Helper para `/<resource>/print` com:
+
+- `proplist` para limitar campos
+- `where`/`queryWords` para filtrar
+- `maxItems` para truncar o retorno
+
+### Listagens prontas (token-friendly)
+
+- `mikrotik__firewall_filter_list`
+- `mikrotik__firewall_mangle_list`
+- `mikrotik__firewall_nat_list`
+
+### Info do sistema
+
+- `mikrotik__system_identity_get`
+- `mikrotik__system_resource_get`
 
 ### `mikrotik__examples`
 
@@ -71,4 +90,3 @@ npm start
 ## Deploy (Portainer/Swarm + Traefik)
 
 Template: `deploy/stack.yml`.
-

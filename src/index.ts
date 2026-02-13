@@ -109,6 +109,53 @@ const RunToolShape = {
 const RunSchema = z.object(RunToolShape).strict();
 type RunInput = z.infer<typeof RunSchema>;
 
+const PrintToolShape = {
+  conn: ConnSchema,
+  // Resource path without trailing /print, e.g. "/ip/firewall/filter"
+  resource: z.string().min(1),
+  // Limits which fields are returned (strongly recommended to reduce tokens).
+  proplist: z.array(z.string().min(1)).optional(),
+  // Simple equality filters applied server-side as RouterOS query words.
+  where: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+  // Advanced: raw query words (ex.: "?=disabled=no", "?~comment=allow").
+  queryWords: z.array(z.string().min(1)).optional(),
+  // Hard cap on returned items to avoid huge LLM responses.
+  maxItems: z.number().int().min(1).max(2000).default(50),
+  // If true, uses RouterOS count-only.
+  countOnly: z.boolean().optional(),
+} as const;
+
+const PrintSchema = z.object(PrintToolShape).strict();
+type PrintInput = z.infer<typeof PrintSchema>;
+
+function toRosValue(value: string | number | boolean): string {
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return String(value);
+}
+
+function normalizeResource(resource: string): string {
+  const r = resource.trim();
+  if (!r) return r;
+  if (r.startsWith("/")) return r.replace(/\/+$/g, "");
+  return `/${r}`.replace(/\/+$/g, "");
+}
+
+function summarizeResultForTokens(result: unknown, maxItems: number): unknown {
+  if (Array.isArray(result)) {
+    const total = result.length;
+    const items = result.slice(0, maxItems);
+    return {
+      ok: true,
+      total,
+      returned: items.length,
+      truncated: total > items.length,
+      items,
+    };
+  }
+  return { ok: true, result };
+}
+
+
 async function runRouterOsCommand(input: RunInput): Promise<unknown> {
   const timeout = input.conn.timeoutMs ?? 45_000;
 
@@ -144,7 +191,7 @@ async function runRouterOsCommand(input: RunInput): Promise<unknown> {
 function createMcpServer(): McpServer {
   const server = new McpServer({
     name: "mcp-mikrotik",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   server.tool(
@@ -167,6 +214,206 @@ function createMcpServer(): McpServer {
       return {
         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       };
+    },
+  );
+
+  server.tool(
+    "mikrotik__print",
+    "Lista itens de um recurso via `<resource>/print` com suporte a proplist/filtros e truncamento para reduzir tokens.",
+    PrintToolShape,
+    async (input: PrintInput) => {
+      const resource = normalizeResource(input.resource);
+      const command = resource.endsWith("/print") ? resource : `${resource}/print`;
+
+      const words: string[] = [];
+
+      if (input.countOnly) {
+        words.push("=count-only=yes");
+      }
+
+      if (input.proplist && input.proplist.length > 0) {
+        words.push(`=.proplist=${input.proplist.join(",")}`);
+      }
+
+      if (input.where) {
+        for (const [key, value] of Object.entries(input.where as Record<string, string | number | boolean>)) {
+          // RouterOS query equality: ?=key=value
+          words.push(`?=${key}=${toRosValue(value)}`);
+        }
+      }
+
+      if (input.queryWords && input.queryWords.length > 0) {
+        words.push(...input.queryWords);
+      }
+
+      const connForLogs = redactConnForLogs({ host: input.conn.host, port: input.conn.port, user: input.conn.user });
+      log("info", "tool.mikrotik__print", {
+        conn: connForLogs,
+        command,
+        maxItems: input.maxItems,
+        wordsCount: words.length,
+        hasProplist: Boolean(input.proplist?.length),
+        hasWhere: Boolean(input.where && Object.keys(input.where).length),
+      });
+
+      const data = await runRouterOsCommand({ conn: input.conn, command, words });
+
+      if (input.countOnly) {
+        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      }
+
+      const result = (data as any)?.result;
+      const summarized = {
+        ...(typeof data === "object" && data !== null ? (data as any) : { ok: true }),
+        result: undefined,
+        summary: summarizeResultForTokens(result, input.maxItems),
+      };
+
+      return { content: [{ type: "text", text: JSON.stringify(summarized, null, 2) }] };
+    },
+  );
+
+  const FirewallListBaseShape = {
+    conn: ConnSchema,
+    chain: z.string().optional(),
+    disabled: z.boolean().optional(),
+    commentContains: z.string().min(1).optional(),
+    proplist: z.array(z.string().min(1)).optional(),
+    maxItems: z.number().int().min(1).max(2000).default(100),
+  } as const;
+
+  type FirewallListInput = {
+    conn: Conn;
+    chain?: string;
+    disabled?: boolean;
+    commentContains?: string;
+    proplist?: string[];
+    maxItems: number;
+  };
+
+  async function firewallList(resource: string, input: FirewallListInput, defaultProplist: string[]): Promise<unknown> {
+    const where: Record<string, string | number | boolean> = {};
+    if (input.chain) where.chain = input.chain;
+    if (typeof input.disabled === "boolean") where.disabled = input.disabled;
+
+    const queryWords: string[] = [];
+    if (input.commentContains) {
+      // RouterOS query regex/contains: ?~comment=...
+      queryWords.push(`?~comment=${input.commentContains}`);
+    }
+
+    const command = `${normalizeResource(resource)}/print`;
+    const words: string[] = [];
+
+    const proplist = input.proplist?.length ? input.proplist : defaultProplist;
+    if (proplist.length) {
+      words.push(`=.proplist=${proplist.join(",")}`);
+    }
+    for (const [key, value] of Object.entries(where)) {
+      words.push(`?=${key}=${toRosValue(value)}`);
+    }
+    if (queryWords.length) words.push(...queryWords);
+
+    const data = await runRouterOsCommand({ conn: input.conn, command, words });
+    const result = (data as any)?.result;
+    return {
+      ...(typeof data === "object" && data !== null ? (data as any) : { ok: true }),
+      result: undefined,
+      summary: summarizeResultForTokens(result, input.maxItems),
+    };
+  }
+
+  server.tool(
+    "mikrotik__firewall_filter_list",
+    "Lista regras de /ip/firewall/filter com truncamento e proplist (economiza tokens).",
+    FirewallListBaseShape,
+    async (input: FirewallListInput) => {
+      const defaultProplist = [
+        ".id",
+        "chain",
+        "action",
+        "protocol",
+        "src-address",
+        "dst-address",
+        "src-port",
+        "dst-port",
+        "in-interface",
+        "out-interface",
+        "comment",
+        "disabled",
+      ];
+      const data = await firewallList("/ip/firewall/filter", input, defaultProplist);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    "mikrotik__firewall_mangle_list",
+    "Lista regras de /ip/firewall/mangle com truncamento e proplist (economiza tokens).",
+    FirewallListBaseShape,
+    async (input: FirewallListInput) => {
+      const defaultProplist = [
+        ".id",
+        "chain",
+        "action",
+        "protocol",
+        "src-address",
+        "dst-address",
+        "src-port",
+        "dst-port",
+        "in-interface",
+        "out-interface",
+        "comment",
+        "disabled",
+      ];
+      const data = await firewallList("/ip/firewall/mangle", input, defaultProplist);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    "mikrotik__firewall_nat_list",
+    "Lista regras de /ip/firewall/nat com truncamento e proplist (economiza tokens).",
+    FirewallListBaseShape,
+    async (input: FirewallListInput) => {
+      const defaultProplist = [
+        ".id",
+        "chain",
+        "action",
+        "protocol",
+        "src-address",
+        "dst-address",
+        "src-port",
+        "dst-port",
+        "to-addresses",
+        "to-ports",
+        "in-interface",
+        "out-interface",
+        "comment",
+        "disabled",
+      ];
+      const data = await firewallList("/ip/firewall/nat", input, defaultProplist);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    "mikrotik__system_identity_get",
+    "Retorna /system/identity/print (pequeno, ideal para testes).",
+    { conn: ConnSchema },
+    async (input: { conn: Conn }) => {
+      const data = await runRouterOsCommand({ conn: input.conn, command: "/system/identity/print" });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    },
+  );
+
+  server.tool(
+    "mikrotik__system_resource_get",
+    "Retorna /system/resource/print (pequeno, ideal para version/uptime).",
+    { conn: ConnSchema },
+    async (input: { conn: Conn }) => {
+      const data = await runRouterOsCommand({ conn: input.conn, command: "/system/resource/print" });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     },
   );
 
